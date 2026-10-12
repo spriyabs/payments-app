@@ -1,0 +1,24 @@
+{
+  "name": "payment-ui",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "webpack serve --mode development",
+    "build": "webpack --mode production",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.0",
+    "@babel/preset-env": "^7.28.0",
+    "@babel/preset-react": "^7.27.0",
+    "babel-loader": "^10.0.0",
+    "html-webpack-plugin": "^5.6.0",
+    "webpack": "^5.100.0",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.0"
+  }
+}

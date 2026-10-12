@@ -1,0 +1,157 @@
+### Try the payment endpoints (IntelliJ HTTP Client). Select the "local" environment.
+###
+### Before you start:
+###   docker compose up -d postgres meridian-mock
+###   cd payments-api && mvn spring-boot:run        (or run PaymentsApiApplication in IntelliJ)
+###
+### Run the requests top to bottom. Requests 2 to 5 share one Idempotency-Key.
+### Payments start PDNG; the mock then calls the webhook and they move to ACCP (or RJCT). Re-run request 5 to see it.
+
+
+### 0. Health check
+GET {{apiUrl}}/actuator/health
+
+
+### 1. Pick a single-use token (this request just checks health again and generates the token). Tokenisation happens before our API and is out of scope,
+### so any new tok_... value works with the Meridian mock. The prefix chooses the outcome:
+###   tok_decline_funds (AM04) | tok_decline_blocked (AC04) | tok_decline_invalid (FF01)
+###   tok_decline_other (NARR) | tok_slow (accepted after 3 minutes) | anything else: accepted
+< {%
+    client.global.set("token", "tok_" + Date.now());
+%}
+GET {{apiUrl}}/actuator/health
+
+
+### 2. Submit a payment (new Idempotency-Key). Expect 202 and status PDNG.
+< {%
+    client.global.set("key", "demo-" + Date.now());
+%}
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: {{key}}
+
+{ "token": "{{token}}", "amount": { "value": "125.50", "currency": "GBP" } }
+
+> {%
+    client.global.set("paymentId", response.body.id);
+    client.test("accepted and pending", function () {
+        client.assert(response.status === 202, "expected 202");
+        client.assert(response.body.status === "PDNG", "expected PDNG");
+        client.assert(response.body.cancellable === true, "expected cancellable");
+    });
+%}
+
+
+### 3. Repeat request 2 exactly. Expect 202 and the SAME payment id (no second payment).
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: {{key}}
+
+{ "token": "{{token}}", "amount": { "value": "125.50", "currency": "GBP" } }
+
+> {%
+    client.test("same payment returned", function () {
+        client.assert(response.status === 202, "expected 202");
+        client.assert(response.body.id === client.global.get("paymentId"), "expected the original payment");
+    });
+%}
+
+
+### 4. Same key, different amount. Expect 409 IDEMPOTENCY_KEY_CONFLICT.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: {{key}}
+
+{ "token": "{{token}}", "amount": { "value": "999.00", "currency": "GBP" } }
+
+> {%
+    client.test("conflict", function () {
+        client.assert(response.status === 409, "expected 409");
+        client.assert(response.body.code === "IDEMPOTENCY_KEY_CONFLICT", "expected IDEMPOTENCY_KEY_CONFLICT");
+    });
+%}
+
+
+### 5. Read the payment back (from our database). Expect 200.
+GET {{apiUrl}}/api/payments/{{paymentId}}
+
+
+### 6. Supported currencies
+GET {{apiUrl}}/api/currencies
+
+
+### ---------- Error cases ----------
+
+### 7. Wrong amount format (one decimal). Expect 400 VALIDATION_ERROR.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-bad-format-{{$timestamp}}
+
+{ "token": "tok_whatever", "amount": { "value": "125.5", "currency": "GBP" } }
+
+
+### 8. Zero amount. Expect 422 INVALID_AMOUNT.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-zero-{{$timestamp}}
+
+{ "token": "tok_whatever", "amount": { "value": "0.00", "currency": "GBP" } }
+
+
+### 9. Amount above the maximum (10000.00). Expect 422 INVALID_AMOUNT.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-big-{{$timestamp}}
+
+{ "token": "tok_whatever", "amount": { "value": "10000.01", "currency": "GBP" } }
+
+
+### 10. Currency Meridian cannot take (no decimals). Expect 422 CURRENCY_NOT_SUPPORTED.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-jpy-{{$timestamp}}
+
+{ "token": "tok_whatever", "amount": { "value": "500.00", "currency": "JPY" } }
+
+
+### 11. Missing Idempotency-Key. Expect 400 VALIDATION_ERROR.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+
+{ "token": "tok_whatever", "amount": { "value": "10.00", "currency": "GBP" } }
+
+
+### 12. Token Meridian rejects (the mock refuses anything not shaped like tok_...). Expect 422 PROVIDER_REJECTED (the payment is saved as RJCT).
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-badtoken-{{$timestamp}}
+
+{ "token": "not-a-token", "amount": { "value": "10.00", "currency": "GBP" } }
+
+
+### 13. Reuse the token from request 1 with a NEW key. Tokens are single-use, so expect 422 PROVIDER_REJECTED.
+POST {{apiUrl}}/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-reuse-{{$timestamp}}
+
+{ "token": "{{token}}", "amount": { "value": "125.50", "currency": "GBP" } }
+
+
+### 14. Cancel the payment from request 2. Expect 200 and status CANC.
+### (Run it soon after request 2: the mock settles payments after 30 seconds, and then the cancel gives 409.)
+POST {{apiUrl}}/api/payments/{{paymentId}}/cancellation
+
+> {%
+    client.test("cancelled", function () {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.status === "CANC", "expected CANC");
+    });
+%}
+
+
+### 15. Cancel it again. Expect 200 and CANC again (cancel is idempotent).
+POST {{apiUrl}}/api/payments/{{paymentId}}/cancellation
+
+
+### 16. Unknown payment id. Expect 404 PAYMENT_NOT_FOUND.
+GET {{apiUrl}}/api/payments/00000000-0000-0000-0000-000000000000

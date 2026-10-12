@@ -1,0 +1,19 @@
+# Secrets and local config
+.env
+.env.local
+
+# Java / Maven
+target/
+*.iml
+.mvn/wrapper/maven-wrapper.jar
+
+# Node / webpack
+node_modules/
+dist/
+npm-debug.log*
+
+# IDEs and OS
+.idea/
+.vscode/
+.DS_Store
+*.log

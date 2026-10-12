@@ -1,0 +1,46 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: payments-api
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payments}
+    username: ${DB_USER:payments}
+    password: ${DB_PASSWORD:payments}
+  jpa:
+    open-in-view: false
+    hibernate:
+      # Hibernate owns the schema (no migration tool). `update` only adds tables
+      # and columns; tests override this with create-drop. See docs/spec.md section 7.
+      ddl-auto: update
+
+# How we call Meridian. Every value comes from an environment variable (see .env.example).
+meridian:
+  base-url: ${MERIDIAN_BASE_URL:http://localhost:9090}
+  api-key: ${MERIDIAN_API_KEY:mock-api-key}
+  webhook-secret: ${MERIDIAN_WEBHOOK_SECRET:local-dev-webhook-secret}
+  # When you run the API on your machine and the mock in Docker, the mock must call back to the
+  # host, not to its own container. docker-compose sets CALLBACK_URL for the containerised API.
+  callback-url: ${CALLBACK_URL:http://host.docker.internal:8080/webhooks/meridian}
+  connect-timeout: 5s
+  read-timeout: 10s
+  max-attempts: 3
+  retry-backoff: 300ms
+
+payments:
+  supported-currencies: ${SUPPORTED_CURRENCIES:GBP,EUR,USD,CAD,AUD,CHF,SEK,NOK,DKK,PLN}
+  max-payment-amount: ${MAX_PAYMENT_AMOUNT:10000.00}
+  # Browser origin allowed to call /api/** (the UI). The webhook endpoint is server to server and has no CORS.
+  cors:
+    allowed-origin: ${CORS_ALLOWED_ORIGIN:http://localhost:3000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true

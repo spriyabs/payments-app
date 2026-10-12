@@ -1,0 +1,550 @@
+openapi: 3.0.3
+info:
+  title: Payments API
+  version: 0.6.0
+  description: |
+    Submits card payments to Meridian Pay using a single-use token, tracks status
+    from Meridian webhooks, and lets the caller cancel a payment while it is
+    still cancellable. Card details never reach this service. Meridian
+    tokenises them, and callers send the resulting single-use Meridian token,
+    which stands in for the card details.
+
+    Payment lifecycle (mirrors Meridian):
+
+      PDNG  Pending
+      ACCP  Authorised, not yet settled (cancellable)
+      ACSC  Settled (final)
+      RJCT  Rejected (final)
+      CANC  Cancelled (final)
+
+    Who calls what: clients call the /api endpoints; Meridian calls only
+    /webhooks/meridian.
+
+    Status changes arrive asynchronously via the webhook endpoint. Clients read
+    the current status by polling GET /api/payments/{id}.
+
+    Errors: every error is an RFC 7807 problem response (application/problem+json)
+    with a stable machine-readable `code`. The full list of codes, with meanings,
+    is the ErrorCode schema and the x-error-reference block at the end of this file.
+servers:
+  - url: http://localhost:8080
+    description: Local (docker compose)
+
+tags:
+  - name: Payments
+  - name: Reference data
+  - name: Webhooks
+
+paths:
+  /api/currencies:
+    get:
+      tags: [Reference data]
+      operationId: listCurrencies
+      summary: Supported currencies
+      description: Currencies accepted for payments (2-decimal currencies only in v1).
+      responses:
+        '200':
+          description: List of supported currencies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Currency'
+              example:
+                - { code: GBP, fractionDigits: 2 }
+                - { code: EUR, fractionDigits: 2 }
+
+  /api/payments:
+    post:
+      tags: [Payments]
+      operationId: createPayment
+      summary: Submit a payment using a Meridian token
+      description: |
+        Called by clients of this service. Creates the payment locally as PDNG,
+        then submits it for authorisation.
+
+        Idempotency: repeating the same request (same Idempotency-Key and same
+        body) returns the existing payment. If an earlier attempt never reached
+        Meridian, it is resubmitted with the same provider key, so it is safe to
+        repeat after PROVIDER_UNAVAILABLE. The same key with a different body is
+        IDEMPOTENCY_KEY_CONFLICT.
+
+        The token is single-use and expires 15 minutes after creation.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+            example:
+              token: tok_8f2a91c4
+              amount: { value: '125.50', currency: GBP }
+      responses:
+        '202':
+          description: Accepted. The final result arrives asynchronously; poll GET /api/payments/{id}.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+              example:
+                id: 3f9a7c1e-5b2d-4e8a-9c1f-0a6d2b7e41c2
+                endToEndId: 3f9a7c1e5b2d4e8a9c1f0a6d2b7e41c2
+                amount: { value: '125.50', currency: GBP }
+                status: PDNG
+                statusReason: null
+                cancellable: true
+                createdAt: '2026-10-08T15:32:10Z'
+                updatedAt: '2026-10-08T15:32:10Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/IdempotencyKeyConflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/ProviderUnavailable'
+
+  /api/payments/{id}:
+    get:
+      tags: [Payments]
+      operationId: getPayment
+      summary: Get current payment status
+      description: Served from the local database; never calls Meridian.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Current payment state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+              example:
+                id: 3f9a7c1e-5b2d-4e8a-9c1f-0a6d2b7e41c2
+                endToEndId: 3f9a7c1e5b2d4e8a9c1f0a6d2b7e41c2
+                amount: { value: '125.50', currency: GBP }
+                status: ACCP
+                statusReason: null
+                cancellable: true
+                createdAt: '2026-10-08T15:32:10Z'
+                updatedAt: '2026-10-08T15:32:14Z'
+        '404':
+          $ref: '#/components/responses/PaymentNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/payments/{id}/cancellation:
+    post:
+      tags: [Payments]
+      operationId: cancelPayment
+      summary: Cancel a payment in PDNG or ACCP
+      description: |
+        Voids the payment with Meridian. Idempotent: cancelling an already
+        cancelled payment returns 200 with the payment. A payment that is
+        already settled (ACSC) or rejected (RJCT) returns PAYMENT_NOT_CANCELLABLE,
+        and the problem body includes the current payment. If Meridian says it
+        cannot cancel, our status is refreshed from Meridian first. A payment
+        that Meridian has not yet confirmed (no provider payment id) returns
+        PROVIDER_UNAVAILABLE: repeat the original submit request, then cancel.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Payment cancelled (or already cancelled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          $ref: '#/components/responses/PaymentNotFound'
+        '409':
+          $ref: '#/components/responses/PaymentNotCancellable'
+        '422':
+          $ref: '#/components/responses/UnprocessableRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/ProviderUnavailable'
+
+  /webhooks/meridian:
+    post:
+      tags: [Webhooks]
+      operationId: receiveMeridianEvent
+      summary: Receive Meridian status callbacks
+      description: |
+        Called by Meridian, not by the UI. The signature is HMAC-SHA256 of the
+        raw request body using the shared webhook secret, compared in constant
+        time.
+
+        Meridian may deliver an event more than once, late, or out of order.
+        Duplicates (same eventId), stale events (invalid transition for the
+        current status) and unknown payments are acknowledged with 200 and
+        otherwise ignored, so Meridian does not retry them. Non-2xx responses
+        make Meridian retry for up to 24 hours.
+
+        A correctly signed body that is not a valid event (unparseable, or a
+        missing field or unknown status) is VALIDATION_ERROR (400), because
+        retrying it can never succeed.
+      parameters:
+        - name: X-Meridian-Signature
+          in: header
+          required: true
+          description: Lowercase hex HMAC-SHA256 of the raw body using the shared webhook secret.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MeridianEvent'
+            example:
+              eventId: evt_91b2c3d4
+              paymentId: pay_3c7e0b12
+              endToEndId: 3f9a7c1e5b2d4e8a9c1f0a6d2b7e41c2
+              status: ACCP
+              statusReason: null
+              occurredAt: '2026-10-08T15:32:14Z'
+      responses:
+        '200':
+          description: Processed, or safely ignored (duplicate, stale or unknown payment).
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/InvalidSignature'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated unique key (for example a UUID) identifying one logical attempt.
+      schema:
+        type: string
+        maxLength: 64
+      example: 7d6f4b1a-2c3e-4f5a-8b9c-0d1e2f3a4b5c
+    PaymentId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  # One reusable response per error. Endpoints link to these with $ref.
+  responses:
+    ValidationError:
+      description: "VALIDATION_ERROR (400). Malformed JSON, missing Idempotency-Key, or a field failed validation (for example the amount is not in the form 125.50)."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Bad Request
+            status: 400
+            code: VALIDATION_ERROR
+            detail: 'amount.value must match ^\d+\.\d{2}$'
+
+    InvalidSignature:
+      description: "INVALID_SIGNATURE (401). Webhook signature missing or invalid. No state is changed."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Unauthorized
+            status: 401
+            code: INVALID_SIGNATURE
+            detail: Webhook signature is missing or invalid
+
+    PaymentNotFound:
+      description: "PAYMENT_NOT_FOUND (404). No payment with that id."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Not Found
+            status: 404
+            code: PAYMENT_NOT_FOUND
+            detail: No payment with that id
+
+    IdempotencyKeyConflict:
+      description: "IDEMPOTENCY_KEY_CONFLICT (409). The Idempotency-Key was already used with a different request body."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Conflict
+            status: 409
+            code: IDEMPOTENCY_KEY_CONFLICT
+            detail: Idempotency-Key was already used with a different request body
+
+    PaymentNotCancellable:
+      description: "PAYMENT_NOT_CANCELLABLE (409). The payment is settled (ACSC) or rejected (RJCT). The body includes the current payment."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Conflict
+            status: 409
+            code: PAYMENT_NOT_CANCELLABLE
+            detail: Payment is settled and can no longer be cancelled
+            payment:
+              id: 3f9a7c1e-5b2d-4e8a-9c1f-0a6d2b7e41c2
+              endToEndId: 3f9a7c1e5b2d4e8a9c1f0a6d2b7e41c2
+              amount: { value: '125.50', currency: GBP }
+              status: ACSC
+              statusReason: null
+              cancellable: false
+              createdAt: '2026-10-08T15:32:10Z'
+              updatedAt: '2026-10-08T22:00:03Z'
+
+    UnprocessableRequest:
+      description: "INVALID_AMOUNT, CURRENCY_NOT_SUPPORTED or PROVIDER_REJECTED (422). The request is well formed but cannot be processed."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Unprocessable Entity
+            status: 422
+            code: CURRENCY_NOT_SUPPORTED
+            detail: Currency JPY is not supported
+
+    ProviderUnavailable:
+      description: "PROVIDER_UNAVAILABLE (502). Meridian was unavailable after retries. On submit the payment stays PDNG and the same request can be repeated safely; on cancel the state is unchanged."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Bad Gateway
+            status: 502
+            code: PROVIDER_UNAVAILABLE
+            detail: Payment provider is unavailable, please try again
+
+    InternalError:
+      description: "INTERNAL_ERROR (500). Unexpected server error. On the webhook it is returned only for genuine processing failures (for example the database is down) so that Meridian retries."
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            title: Internal Server Error
+            status: 500
+            code: INTERNAL_ERROR
+            detail: Unexpected error
+
+  schemas:
+    Amount:
+      type: object
+      required: [value, currency]
+      properties:
+        value:
+          type: string
+          pattern: '^\d+\.\d{2}$'
+          description: Decimal string with exactly two decimal places.
+          example: '125.50'
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217 currency code from the supported list.
+          example: GBP
+
+    Currency:
+      type: object
+      properties:
+        code: { type: string, example: GBP }
+        fractionDigits: { type: integer, example: 2 }
+
+    CreatePaymentRequest:
+      type: object
+      required: [token, amount]
+      properties:
+        token:
+          type: string
+          description: |
+            The tokenised card details. A single-use token issued by Meridian that
+            stands in for the real card data: Meridian holds the card details, and
+            this service never receives or stores them. Expires 15 minutes after
+            it was created.
+          example: tok_8f2a91c4
+        amount:
+          $ref: '#/components/schemas/Amount'
+
+    Status:
+      type: string
+      enum: [PDNG, ACCP, ACSC, RJCT, CANC]
+      description: |
+        PDNG pending, ACCP authorised, ACSC settled (final), RJCT rejected (final),
+        CANC cancelled (final).
+
+    StatusReason:
+      type: string
+      nullable: true
+      enum: [AM04, AC04, FF01, NARR]
+      description: |
+        Present when status is RJCT.
+        AM04 insufficient funds, AC04 card closed or blocked,
+        FF01 invalid card data, NARR other.
+
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        endToEndId:
+          type: string
+          maxLength: 35
+          description: Our reference, sent to Meridian and returned unchanged on every callback.
+        amount:
+          $ref: '#/components/schemas/Amount'
+        status:
+          $ref: '#/components/schemas/Status'
+        statusReason:
+          $ref: '#/components/schemas/StatusReason'
+        cancellable:
+          type: boolean
+          description: True when status is PDNG or ACCP.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    MeridianEvent:
+      type: object
+      required: [eventId, paymentId, endToEndId, status, occurredAt]
+      properties:
+        eventId:
+          type: string
+          description: Unique per event; used to deduplicate redeliveries.
+        paymentId:
+          type: string
+          description: Meridian's payment id.
+        endToEndId:
+          type: string
+          description: Our reference; used to find the payment.
+        status:
+          $ref: '#/components/schemas/Status'
+        statusReason:
+          type: string
+          nullable: true
+        occurredAt: { type: string, format: date-time }
+
+    ErrorCode:
+      type: string
+      description: |
+        Stable machine-readable error code. The meaning of each code and the
+        endpoints that return it are listed in x-error-reference at the end of
+        this file.
+      enum:
+        - VALIDATION_ERROR
+        - INVALID_SIGNATURE
+        - PAYMENT_NOT_FOUND
+        - IDEMPOTENCY_KEY_CONFLICT
+        - PAYMENT_NOT_CANCELLABLE
+        - INVALID_AMOUNT
+        - CURRENCY_NOT_SUPPORTED
+        - PROVIDER_REJECTED
+        - PROVIDER_UNAVAILABLE
+        - INTERNAL_ERROR
+
+    Problem:
+      type: object
+      description: RFC 7807 problem details with a stable error code.
+      required: [title, status, code]
+      properties:
+        type: { type: string, example: 'about:blank' }
+        title: { type: string, example: Unprocessable Entity }
+        status: { type: integer, example: 422 }
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        detail: { type: string, example: 'Currency JPY is not supported' }
+        instance: { type: string }
+        payment:
+          allOf:
+            - $ref: '#/components/schemas/Payment'
+          description: Current payment. Only present for PAYMENT_NOT_CANCELLABLE.
+
+# ---------------------------------------------------------------------------
+# Error reference (documentation only; tools ignore x- extensions).
+# Each code below is a value of the ErrorCode schema and is linked from the
+# endpoints through the reusable responses in components/responses.
+# ---------------------------------------------------------------------------
+x-error-reference:
+  errorCodes:
+    VALIDATION_ERROR:
+      http: 400
+      meaning: Malformed JSON, missing Idempotency-Key, or a field failed validation (for example the amount is not in the form 125.50).
+      response: '#/components/responses/ValidationError'
+      endpoints: ['POST /api/payments']
+    INVALID_SIGNATURE:
+      http: 401
+      meaning: Webhook signature missing or invalid. No state is changed.
+      response: '#/components/responses/InvalidSignature'
+      endpoints: ['POST /webhooks/meridian']
+    PAYMENT_NOT_FOUND:
+      http: 404
+      meaning: No payment with that id.
+      response: '#/components/responses/PaymentNotFound'
+      endpoints: ['GET /api/payments/{id}', 'POST /api/payments/{id}/cancellation']
+    IDEMPOTENCY_KEY_CONFLICT:
+      http: 409
+      meaning: The Idempotency-Key was already used with a different request body.
+      response: '#/components/responses/IdempotencyKeyConflict'
+      endpoints: ['POST /api/payments']
+    PAYMENT_NOT_CANCELLABLE:
+      http: 409
+      meaning: The payment is settled (ACSC) or rejected (RJCT) and cannot be cancelled. The body includes the current payment.
+      response: '#/components/responses/PaymentNotCancellable'
+      endpoints: ['POST /api/payments/{id}/cancellation']
+    INVALID_AMOUNT:
+      http: 422
+      meaning: The amount is zero, or above the configured maximum.
+      response: '#/components/responses/UnprocessableRequest'
+      endpoints: ['POST /api/payments']
+    CURRENCY_NOT_SUPPORTED:
+      http: 422
+      meaning: The currency is not on the allowlist, or has 0 or 3 decimal places (not supported in v1).
+      response: '#/components/responses/UnprocessableRequest'
+      endpoints: ['POST /api/payments']
+    PROVIDER_REJECTED:
+      http: 422
+      meaning: Meridian rejected the request, for example the token is expired or already used, or Meridian does not know the payment being cancelled.
+      response: '#/components/responses/UnprocessableRequest'
+      endpoints: ['POST /api/payments', 'POST /api/payments/{id}/cancellation']
+    PROVIDER_UNAVAILABLE:
+      http: 502
+      meaning: Meridian was unavailable after retries. On submit the payment stays PDNG and repeating the same request is safe; on cancel the state is unchanged and the cancel can be retried.
+      response: '#/components/responses/ProviderUnavailable'
+      endpoints: ['POST /api/payments', 'POST /api/payments/{id}/cancellation']
+    INTERNAL_ERROR:
+      http: 500
+      meaning: Unexpected server error. On the webhook it is returned only for genuine processing failures (for example the database is down) so that Meridian retries.
+      response: '#/components/responses/InternalError'
+      endpoints: ['all']
+  successCodes:
+    '200': Success. Also returned for a repeated cancel, and for webhooks that are duplicates, stale or for unknown payments (so Meridian stops retrying).
+    '202': Payment accepted for processing. The final result arrives later via webhook; poll GET /api/payments/{id}.
+  declineReasons:
+    description: Returned in statusReason when a payment has status RJCT. These are payment outcomes, not API errors.
+    AM04:
+      meaning: Insufficient funds.
+      uiMessage: Insufficient funds
+    AC04:
+      meaning: Card closed or blocked.
+      uiMessage: Card is closed or blocked
+    FF01:
+      meaning: Invalid card data.
+      uiMessage: Card details are invalid
+    NARR:
+      meaning: Other reason; see the provider logs.
+      uiMessage: Payment could not be completed

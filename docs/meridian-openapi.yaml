@@ -1,0 +1,240 @@
+openapi: 3.0.3
+info:
+  title: Meridian Pay API (mock)
+  version: 1.0.0
+  description: |
+    Fictional card payment provider for the Sycurio engineering exercise.
+    Status and reason codes are simplified from ISO 20022.
+
+    Payment lifecycle:
+      PDNG  Pending, submitted for authorisation
+      ACCP  Authorised, not yet settled. Can be cancelled (void).
+      ACSC  Settled. Can only be refunded.
+      RJCT  Rejected
+      CANC  Cancelled before settlement
+
+    Authorised payments settle daily at 22:00 UTC.
+    Authorisation results are delivered asynchronously to the callbackUrl,
+    usually within seconds but occasionally after several minutes.
+    Callbacks may be delivered more than once.
+
+servers:
+  - url: https://sandbox.meridianpay.example/v1
+
+paths:
+  /tokens:
+    post:
+      summary: Tokenise card details
+      description: Exchanges raw card data for a single-use token. Tokens expire after 15 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CardDetails'
+      responses:
+        '201':
+          description: Token created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string, example: tok_8f2a91c4 }
+                  maskedPan: { type: string, example: '411111******1111' }
+                  expiresAt: { type: string, format: date-time }
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /payments:
+    post:
+      summary: Request authorisation
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '202':
+          description: Accepted for processing. Final result is sent to callbackUrl.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '409':
+          description: Idempotency key reused with a different request body
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /payments/{paymentId}:
+    get:
+      summary: Get payment status
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Current payment state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '404':
+          description: Not found
+
+  /payments/{paymentId}/cancellation:
+    post:
+      summary: Cancel (void) an authorised payment
+      description: Only valid while status is PDNG or ACCP.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Payment cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '409':
+          description: Payment already settled or in a final state
+
+  /payments/{paymentId}/refunds:
+    post:
+      summary: Refund a settled payment
+      description: Only valid when status is ACSC. Partial refunds allowed up to the settled amount.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount: { $ref: '#/components/schemas/Amount' }
+                reason: { type: string, maxLength: 140 }
+      responses:
+        '201':
+          description: Refund accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  refundId: { type: string }
+                  paymentId: { type: string }
+                  amount: { $ref: '#/components/schemas/Amount' }
+                  status: { type: string, enum: [PDNG, ACSC, RJCT] }
+        '409':
+          description: Payment not settled, or refund exceeds remaining amount
+
+webhooks:
+  paymentStatusChanged:
+    post:
+      summary: Sent to the merchant callbackUrl when a payment changes status
+      parameters:
+        - name: X-Meridian-Signature
+          in: header
+          required: true
+          description: HMAC-SHA256 of the raw body using the shared webhook secret
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                eventId: { type: string }
+                paymentId: { type: string }
+                endToEndId: { type: string }
+                status: { $ref: '#/components/schemas/Status' }
+                statusReason: { $ref: '#/components/schemas/StatusReason' }
+                occurredAt: { type: string, format: date-time }
+      responses:
+        '2XX':
+          description: Acknowledged. Any other response triggers retries for up to 24 hours.
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, maxLength: 64 }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    ValidationError:
+      description: Request failed validation
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code: { type: string }
+              message: { type: string }
+
+  schemas:
+    Amount:
+      type: object
+      required: [value, currency]
+      properties:
+        value: { type: string, pattern: '^\d+\.\d{2}$', example: '125.50' }
+        currency: { type: string, pattern: '^[A-Z]{3}$', example: GBP }
+
+    CardDetails:
+      type: object
+      required: [pan, expiryMonth, expiryYear, cvv]
+      properties:
+        pan: { type: string, example: '4111111111111111' }
+        expiryMonth: { type: integer, minimum: 1, maximum: 12 }
+        expiryYear: { type: integer }
+        cvv: { type: string }
+
+    PaymentRequest:
+      type: object
+      required: [endToEndId, amount, token, callbackUrl]
+      properties:
+        endToEndId:
+          type: string
+          maxLength: 35
+          description: Merchant reference, returned unchanged on every callback
+        amount: { $ref: '#/components/schemas/Amount' }
+        token: { type: string }
+        callbackUrl: { type: string, format: uri }
+
+    Payment:
+      type: object
+      properties:
+        paymentId: { type: string, example: pay_3c7e0b12 }
+        endToEndId: { type: string }
+        amount: { $ref: '#/components/schemas/Amount' }
+        maskedPan: { type: string }
+        status: { $ref: '#/components/schemas/Status' }
+        statusReason: { $ref: '#/components/schemas/StatusReason' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Status:
+      type: string
+      enum: [PDNG, ACCP, ACSC, RJCT, CANC]
+
+    StatusReason:
+      type: string
+      nullable: true
+      description: |
+        Present when status is RJCT.
+          AM04  Insufficient funds
+          AC04  Card closed or blocked
+          FF01  Invalid card data
+          NARR  Other, see provider logs
+      enum: [AM04, AC04, FF01, NARR]

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <!-- Spring Boot 4.1 (Spring Framework 7, Tomcat 11, Jackson 3, Hibernate 7, Testcontainers 2).
+             Moved from 3.5.16, whose open-source support ended on 2026-06-30 with unfixed CVEs. -->
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.example</groupId>
+    <artifactId>payments-api</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>payments-api</name>
+    <description>Payments API: submits and tracks card payments through Meridian Pay</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <!-- Security overrides of versions managed by Spring Boot 4.1.1 (checked October 2026).
+             Remove each line once a Spring Boot release manages that version or newer. -->
+        <!-- Tomcat 11.0.25 and 11.0.26 fix the CVEs reported against 11.0.24 (core and websocket) -->
+        <tomcat.version>11.0.26</tomcat.version>
+        <!-- Jackson 3.1.7 (core and databind) fixes CVE-2026-89407 and the September 2026 databind advisories -->
+        <jackson-bom.version>3.1.7</jackson-bom.version>
+        <!-- Logback fixed CVE-2026-19880 only in the 1.6 line (1.6.3+; 1.6.5 also fixes CVE-2026-104721) -->
+        <logback.version>1.6.5</logback.version>
+        <!-- pgjdbc 42.7.14 fixes CVE-2026-107314 and CVE-2026-107315 -->
+        <postgresql.version>42.7.14</postgresql.version>
+    </properties>
+
+    <dependencies>
+        <!-- Core starter: auto-configuration, logging, YAML support. The other starters
+             already pull it in; it is listed so the base dependency is explicit. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Tests: real Postgres via Testcontainers, no H2 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Boot 4 splits test support per technology: @DataJpaTest and @AutoConfigureTestDatabase -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- TestRestTemplate (and the RestTemplateBuilder it is built from) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-resttestclient</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-restclient</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Fake Meridian for client and integration tests. The standalone jar bundles
+             its own Jetty, so it cannot clash with Spring Boot's Tomcat. -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>3.9.1</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>payments-api</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
